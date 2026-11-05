@@ -1,0 +1,265 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// SONGBOOK PLATFORM — schema v2
+// Ứng dụng soạn bản nhạc (lời + hợp âm), chia sẻ/fork, theo dõi luyện tập, tra cứu thế tay, playlist
+//
+// Quy ước: id = uuid Char(36) · enum lưu dạng String + comment (đồng nhất style) · cột snake_case qua @map
+// Nhóm bảng theo module M00 → M06 (M05, M06 là tùy chọn)
+// ============================================================================
+
+// ############################################################################
+// M00 — FOUNDATION: AUTH · USER
+// ############################################################################
+
+model User {
+  userId       String   @id @default(uuid()) @map("user_id") @db.Char(36)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  displayName  String   @map("display_name") @db.VarChar(100)
+  role         String   @default("user") @db.VarChar(20) // user | admin
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  roleDefinition Role @relation(fields: [role], references: [code], onUpdate: Cascade, onDelete: Restrict)
+
+  // M01
+  songs             Song[]
+  revisionsCreated  SongRevision[] @relation("RevisionCreatedByUser")
+  // M02
+  playlists         Playlist[]
+  favorites         Favorite[]
+  // M03
+  sessions          PracticeSession[]
+  stat              PracticeStat?
+  // M05
+  lessonProgress    UserLessonProgress[]
+  // M06
+  metronomePresets  MetronomePreset[]
+
+  @@map("users")
+}
+
+model Role {
+  code      String   @id @db.VarChar(20)
+  name      String   @db.VarChar(100)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users User[]
+
+  @@map("roles")
+}
+
+// ############################################################################
+// M01 — SONG · PARSER · FORK · REVISION
+// rawText = văn bản thô người dùng nhập (ChordPro) · content = AST đã parse (JSONB)
+// ############################################################################
+
+model Song {
+  songId        String   @id @default(uuid()) @map("song_id") @db.Char(36)
+  ownerId       String   @map("owner_id") @db.Char(36)
+  title         String   @db.VarChar(255)
+  artist        String?  @db.VarChar(255)
+  // Fork: self-reference. forkedFromId = bài gốc (null nếu là bài tự tạo)
+  forkedFromId  String?  @map("forked_from_id") @db.Char(36)
+  rawText       String   @map("raw_text") @db.Text
+  content       Json     @db.JsonB
+  schemaVersion Int      @default(1) @map("schema_version") // phiên bản định dạng AST
+  version       Int      @default(1) // optimistic locking: UPDATE ... WHERE song_id = ? AND version = ?
+  visibility    String   @default("private") @db.VarChar(20) // private | public
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  owner      User  @relation(fields: [ownerId], references: [userId])
+  forkedFrom Song? @relation("SongFork", fields: [forkedFromId], references: [songId], onDelete: SetNull)
+  forks      Song[] @relation("SongFork")
+
+  revisions     SongRevision[]
+  playlistItems PlaylistSong[]
+  favorites     Favorite[]
+  sessions      PracticeSession[]
+
+  @@index([ownerId])
+  @@index([forkedFromId])
+  @@index([visibility, createdAt])
+  @@map("songs")
+}
+
+// Lịch sử phiên bản bài hát — mỗi lần cập nhật thành công ghi 1 revision (cùng transaction)
+model SongRevision {
+  revisionId  String   @id @default(uuid()) @map("revision_id") @db.Char(36)
+  songId      String   @map("song_id") @db.Char(36)
+  version     Int
+  rawText     String   @map("raw_text") @db.Text
+  content     Json     @db.JsonB
+  createdById String   @map("created_by_id") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  song      Song @relation(fields: [songId], references: [songId], onDelete: Cascade)
+  createdBy User @relation("RevisionCreatedByUser", fields: [createdById], references: [userId])
+
+  @@unique([songId, version])
+  @@map("song_revisions")
+}
+
+// ############################################################################
+// M02 — PLAYLIST · FAVORITE
+// ############################################################################
+
+model Playlist {
+  playlistId String   @id @default(uuid()) @map("playlist_id") @db.Char(36)
+  ownerId    String   @map("owner_id") @db.Char(36)
+  name       String   @db.VarChar(100)
+  visibility String   @default("private") @db.VarChar(20) // private | public
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  owner User           @relation(fields: [ownerId], references: [userId])
+  songs PlaylistSong[]
+
+  @@index([ownerId])
+  @@map("playlists")
+}
+
+model PlaylistSong {
+  playlistId String   @map("playlist_id") @db.Char(36)
+  songId     String   @map("song_id") @db.Char(36)
+  position   Int
+  addedAt    DateTime @default(now()) @map("added_at")
+
+  playlist Playlist @relation(fields: [playlistId], references: [playlistId], onDelete: Cascade)
+  song     Song     @relation(fields: [songId], references: [songId], onDelete: Cascade)
+
+  @@id([playlistId, songId]) // một bài chỉ xuất hiện 1 lần trong playlist
+  @@index([playlistId, position])
+  @@map("playlist_songs")
+}
+
+model Favorite {
+  userId    String   @map("user_id") @db.Char(36)
+  songId    String   @map("song_id") @db.Char(36)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  song Song @relation(fields: [songId], references: [songId], onDelete: Cascade)
+
+  @@id([userId, songId])
+  @@index([userId, createdAt])
+  @@map("favorites")
+}
+
+// ############################################################################
+// M03 — PRACTICE TRACKING
+// Idempotency: client sinh clientRequestId (UUID) → gửi trùng không ghi 2 lần
+// ############################################################################
+
+model PracticeSession {
+  sessionId       String   @id @default(uuid()) @map("session_id") @db.Char(36)
+  userId          String   @map("user_id") @db.Char(36)
+  songId          String?  @map("song_id") @db.Char(36) // null = luyện tập tự do, không gắn bài
+  durationSec     Int      @map("duration_sec")
+  practicedAt     DateTime @map("practiced_at")
+  clientRequestId String   @map("client_request_id") @db.Char(36)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User  @relation(fields: [userId], references: [userId])
+  song Song? @relation(fields: [songId], references: [songId], onDelete: SetNull)
+
+  @@unique([userId, clientRequestId])
+  @@index([userId, practicedAt(sort: Desc)])
+  @@map("practice_sessions")
+}
+
+// Thống kê cộng dồn — cập nhật atomic (UPDATE ... SET total = total + n) cùng transaction với session
+model PracticeStat {
+  userId        String @id @map("user_id") @db.Char(36)
+  totalSeconds  Int    @default(0) @map("total_seconds")
+  totalSessions Int    @default(0) @map("total_sessions")
+
+  user User @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@map("practice_stats")
+}
+
+// ############################################################################
+// M04 — CHORD SHAPE SEARCH (cache-aside Redis)
+// ############################################################################
+
+model ChordShape {
+  chordShapeId String  @id @default(uuid()) @map("chord_shape_id") @db.Char(36)
+  instrument   String  @db.VarChar(20) // guitar | piano
+  root         String  @db.VarChar(5) // C, C#, D, ...
+  quality      String  @db.VarChar(20) // major | minor | 7 | maj7 | m7 | sus4 | ...
+  name         String  @db.VarChar(20) // "Am7"
+  difficulty   Int // 1..5
+  frets        Json    @db.JsonB // guitar: [-1,0,2,0,1,0] (-1 = không bấm) · piano: danh sách nốt
+  fingers      Json?   @db.JsonB
+
+  @@index([instrument, root, quality])
+  @@index([instrument, difficulty])
+  @@map("chord_shapes")
+}
+
+// ############################################################################
+// M05 — LEARNING PATH (tùy chọn)
+// ############################################################################
+
+model Lesson {
+  lessonId    String  @id @default(uuid()) @map("lesson_id") @db.Char(36)
+  title       String  @db.VarChar(255)
+  description String? @db.Text
+  level       Int
+
+  prerequisites LessonPrerequisite[] @relation("LessonRequires")
+  requiredBy    LessonPrerequisite[] @relation("LessonIsRequired")
+  progress      UserLessonProgress[]
+
+  @@map("lessons")
+}
+
+model LessonPrerequisite {
+  lessonId       String @map("lesson_id") @db.Char(36)
+  prerequisiteId String @map("prerequisite_id") @db.Char(36)
+
+  lesson       Lesson @relation("LessonRequires", fields: [lessonId], references: [lessonId], onDelete: Cascade)
+  prerequisite Lesson @relation("LessonIsRequired", fields: [prerequisiteId], references: [lessonId], onDelete: Cascade)
+
+  @@id([lessonId, prerequisiteId])
+  @@map("lesson_prerequisites")
+}
+
+model UserLessonProgress {
+  userId      String   @map("user_id") @db.Char(36)
+  lessonId    String   @map("lesson_id") @db.Char(36)
+  completedAt DateTime @default(now()) @map("completed_at")
+
+  user   User   @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [lessonId], onDelete: Cascade)
+
+  @@id([userId, lessonId])
+  @@map("user_lesson_progress")
+}
+
+// ############################################################################
+// M06 — METRONOME PRESET (tùy chọn)
+// ############################################################################
+
+model MetronomePreset {
+  presetId      String   @id @default(uuid()) @map("preset_id") @db.Char(36)
+  ownerId       String?  @map("owner_id") @db.Char(36) // null = preset dùng chung của hệ thống
+  name          String   @db.VarChar(100)
+  bpm           Int
+  timeSignature String   @map("time_signature") @db.VarChar(10) // "4/4" | "3/4" | "6/8"
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  owner User? @relation(fields: [ownerId], references: [userId], onDelete: Cascade)
+
+  @@index([ownerId])
+  @@map("metronome_presets")
+}

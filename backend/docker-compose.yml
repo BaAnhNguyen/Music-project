@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    ports: ["3000:3000"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://songbook:songbook@postgres:5432/songbook?schema=public
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: songbook
+      POSTGRES_PASSWORD: songbook
+      POSTGRES_DB: songbook
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U songbook"]
+      interval: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+volumes:
+  pgdata:
