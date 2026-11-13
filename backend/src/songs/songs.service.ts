@@ -6,11 +6,18 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { diffLines } from 'diff';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ChordValidationException, parseSongText, SongAst } from './parser/chord.validator';
 import { CreateSongDto } from './dto/create-song.dto';
 import { QuerySongsDto } from './dto/query-songs.dto';
 import { UpdateSongDto } from './dto/update-song.dto';
+import { PaginationQueryDto } from './dto/pagination-query.dto';
+import { DiffQueryDto } from './dto/diff-query.dto';
+
+// Giới hạn số cấp khi đi ngược chuỗi fork, tránh lặp vô hạn nếu dữ liệu bị vòng
+const MAX_LINEAGE_DEPTH = 20;
+
 @Injectable()
 export class SongService {
   constructor(private readonly prisma: PrismaService) {}
@@ -166,6 +173,163 @@ export class SongService {
       console.error('SongService.createSong Error:', error);
       throw new InternalServerErrorException('Lỗi hệ thống khi tạo bài hát.');
     }
+  }
+
+  // ---- Fork & lịch sử revision ----
+
+  // Xem được bài khi bài PUBLIC hoặc user là chủ bài
+  private canRead(song: { ownerId: string; visibility: string }, userId?: string) {
+    return song.visibility === 'public' || (userId !== undefined && song.ownerId === userId);
+  }
+
+  // 404 nếu không có bài, 403 nếu không đủ quyền xem
+  private async assertCanRead(db: Prisma.TransactionClient, songId: string, userId?: string) {
+    const song = await db.song.findUnique({
+      where: { songId },
+      select: { songId: true, ownerId: true, visibility: true },
+    });
+    if (!song) throw new NotFoundException('Song not found');
+    if (!this.canRead(song, userId)) throw new ForbiddenException('You cannot view this song');
+    return song;
+  }
+
+  // Tạo bản sao độc lập cho user hiện tại: Song mới + revision v1 trong cùng 1 transaction
+  async fork(songId: string, userId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const src = await tx.song.findUnique({ where: { songId } });
+      if (!src) throw new NotFoundException('Song not found');
+      if (!this.canRead(src, userId)) throw new ForbiddenException('You cannot fork this song');
+
+      const content = src.content as Prisma.InputJsonValue;
+      const forked = await tx.song.create({
+        data: {
+          ownerId: userId,
+          title: src.title,
+          artist: src.artist,
+          forkedFromId: src.songId,
+          rawText: src.rawText,
+          content,
+          schemaVersion: src.schemaVersion,
+          version: 1,
+          visibility: 'private', // fork luôn bắt đầu ở chế độ riêng tư
+        },
+      });
+      await tx.songRevision.create({
+        data: { songId: forked.songId, version: 1, rawText: forked.rawText, content, createdById: userId },
+      });
+      return forked;
+    });
+  }
+
+  // Fork trực tiếp của một bài; người lạ chỉ thấy fork PUBLIC, chủ fork thấy cả fork PRIVATE của mình
+  async listForks(songId: string, userId: string | undefined, query: PaginationQueryDto) {
+    await this.assertCanRead(this.prisma, songId, userId);
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const where: Prisma.SongWhereInput = {
+      forkedFromId: songId,
+      OR: [{ visibility: 'public' }, ...(userId ? [{ ownerId: userId }] : [])],
+    };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.song.findMany({
+        where,
+        select: {
+          songId: true,
+          ownerId: true,
+          title: true,
+          artist: true,
+          visibility: true,
+          version: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.song.count({ where }),
+    ]);
+    return { data, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  }
+
+  // Chuỗi tổ tiên: bài này -> bài gốc, đi từng cấp, tối đa MAX_LINEAGE_DEPTH cấp
+  async lineage(songId: string, userId?: string) {
+    const chain: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    let currentId: string | null = songId;
+
+    while (currentId && chain.length < MAX_LINEAGE_DEPTH) {
+      if (seen.has(currentId)) break; // dữ liệu bị vòng thì dừng
+      seen.add(currentId);
+
+      const song: {
+        songId: string;
+        title: string;
+        artist: string | null;
+        ownerId: string;
+        visibility: string;
+        forkedFromId: string | null;
+      } | null = await this.prisma.song.findUnique({
+        where: { songId: currentId },
+        select: { songId: true, title: true, artist: true, ownerId: true, visibility: true, forkedFromId: true },
+      });
+
+      if (!song) {
+        if (chain.length === 0) throw new NotFoundException('Song not found');
+        break;
+      }
+      if (!this.canRead(song, userId)) {
+        if (chain.length === 0) throw new ForbiddenException('You cannot view this song');
+        chain.push({ hidden: true }); // tổ tiên riêng tư của người khác: không lộ thông tin
+        break;
+      }
+      chain.push({
+        songId: song.songId,
+        title: song.title,
+        artist: song.artist,
+        ownerId: song.ownerId,
+        forkedFromId: song.forkedFromId,
+      });
+      currentId = song.forkedFromId;
+    }
+    return chain;
+  }
+
+  // Lịch sử revision (không kèm nội dung)
+  async listRevisions(songId: string, userId?: string) {
+    await this.assertCanRead(this.prisma, songId, userId);
+    return this.prisma.songRevision.findMany({
+      where: { songId },
+      orderBy: { version: 'desc' },
+      select: { version: true, createdAt: true, createdById: true },
+    });
+  }
+
+  // Nội dung đầy đủ của một revision
+  async getRevision(songId: string, version: number, userId?: string) {
+    await this.assertCanRead(this.prisma, songId, userId);
+    const revision = await this.prisma.songRevision.findUnique({
+      where: { songId_version: { songId, version } },
+    });
+    if (!revision) throw new NotFoundException('Revision not found');
+    return revision;
+  }
+
+  // So sánh rawText của hai revision theo từng dòng
+  async diff(songId: string, query: DiffQueryDto, userId?: string) {
+    await this.assertCanRead(this.prisma, songId, userId);
+    const revisions = await this.prisma.songRevision.findMany({
+      where: { songId, version: { in: [query.from, query.to] } },
+      select: { version: true, rawText: true },
+    });
+    const a = revisions.find((r) => r.version === query.from);
+    const b = revisions.find((r) => r.version === query.to);
+    if (!a || !b) throw new NotFoundException('Revision not found');
+
+    return diffLines(a.rawText, b.rawText).map((part) => ({
+      type: part.added ? 'added' : part.removed ? 'removed' : 'unchanged',
+      value: part.value,
+    }));
   }
 
   parsePreview(rawText: string): SongAst {

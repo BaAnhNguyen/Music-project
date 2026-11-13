@@ -6,6 +6,8 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -19,6 +21,8 @@ import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from 'src/common/guards/optional-jwt-auth.guard';
 import { QuerySongsDto } from './dto/query-songs.dto';
 import { UpdateSongDto } from './dto/update-song.dto';
+import { PaginationQueryDto } from './dto/pagination-query.dto';
+import { DiffQueryDto } from './dto/diff-query.dto';
 import { Public } from 'src/common/decorators/public.decorator';
 
 @ApiTags('songs')
@@ -44,6 +48,49 @@ export class SongController {
   @Get(':id')
   getSong(@Param('id') id: string, @Req() req: any) {
     return this.service.getSong(id, req.user?.userId);
+  }
+
+  // Fork bài PUBLIC (hoặc bài của mình) thành bản sao riêng tư cho user hiện tại
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/fork')
+  forkSong(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+    return this.service.fork(id, req.user.userId);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get(':id/forks')
+  listForks(@Param('id', ParseUUIDPipe) id: string, @Req() req: any, @Query() query: PaginationQueryDto) {
+    return this.service.listForks(id, req.user?.userId, query);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get(':id/lineage')
+  lineage(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+    return this.service.lineage(id, req.user?.userId);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get(':id/revisions')
+  listRevisions(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+    return this.service.listRevisions(id, req.user?.userId);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get(':id/revisions/:v')
+  getRevision(@Param('id', ParseUUIDPipe) id: string, @Param('v', ParseIntPipe) v: number, @Req() req: any) {
+    return this.service.getRevision(id, v, req.user?.userId);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get(':id/diff')
+  diff(@Param('id', ParseUUIDPipe) id: string, @Query() query: DiffQueryDto, @Req() req: any) {
+    return this.service.diff(id, query, req.user?.userId);
   }
 
   @ApiBearerAuth()
