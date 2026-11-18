@@ -8,9 +8,19 @@ cp .env.example .env
 npm install
 docker compose up -d postgres redis
 npx prisma migrate dev --name init
-npm run prisma:seed
-npm run start:dev      # Swagger: http://localhost:3000/docs
+npx prisma db seed
+npm run dev            # Swagger: http://localhost:3000/docs
 ```
+
+Redis chạy tại `localhost:6379` khi chạy backend ngoài Docker. Nếu muốn chạy
+cả API, PostgreSQL và Redis trong Docker, tạo `.env` từ `.env.example` rồi chạy:
+
+```bash
+docker compose up --build
+```
+
+Trong mạng Docker Compose, API tự động kết nối Redis qua
+`redis://redis:6379`.
 
 ## Lộ trình triển khai gợi ý
 1. Auth (register/login, JWT, RolesGuard)
