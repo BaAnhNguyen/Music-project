@@ -10,6 +10,7 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { SongsModule } from './songs/songs.module';
 import { PlaylistsModule } from './playlists/playlists.module';
+import { FavoritesModule } from './favorites/favorites.module';
 import { PracticeModule } from './practice/practice.module';
 import { ChordsModule } from './chords/chords.module';
 import { LessonsModule } from './lessons/lessons.module';
@@ -31,6 +32,7 @@ import { MetronomeModule } from './metronome/metronome.module';
     UsersModule,
     SongsModule,
     PlaylistsModule,
+    FavoritesModule,
     PracticeModule,
     ChordsModule,
     LessonsModule,
